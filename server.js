@@ -3,38 +3,44 @@ const app = express();
 const http = require('http').createServer(app);
 const path = require('path');
 
-// --- ÖNEMLİ GÜNCELLEME: CORS AYARLARI ---
+// --- CİDDİ GÜNCELLEME: CORS ve WebSocket Ayarları ---
 const io = require('socket.io')(http, {
     cors: {
-        // Sadece senin sitene ve yerel test ortamına izin veriyoruz
-        origin: [
-            "https://doshu.gamer.gd", 
-            "http://doshu.gamer.gd",
-            "http://localhost:3000",
-            "http://127.0.0.1:5500" // Eğer VS Code Live Server kullanıyorsan
-        ],
+        // origin kısmını bir fonksiyon yaparak esneklik sağlıyoruz
+        origin: function (origin, callback) {
+            const allowedOrigins = [
+                "https://doshu.gamer.gd", 
+                "http://doshu.gamer.gd",
+                "http://localhost:3000",
+                "http://127.0.0.1:5500"
+            ];
+            // Eğer origin listede varsa veya origin yoksa (server-to-server) izin ver
+            if (!origin || allowedOrigins.indexOf(origin) !== -1) {
+                callback(null, true);
+            } else {
+                console.log("Engellenen Origin:", origin); // Loglardan kimin engellendiğini görebilirsin
+                callback(new Error('CORS not allowed'));
+            }
+        },
         methods: ["GET", "POST"],
         credentials: true
     }
 });
 
-// Render'da statik dosya sunmaya gerek yok ama hata vermemesi için kalsın
 app.use(express.static(path.join(__dirname, 'public')));
 
 let players = {};
 let currentPlayerIndex = 0;
 let playerIds = [];
 
-// Basit oyun durumu
 const gameState = {
-    properties: {}, // Satın alınan mülkler: { propertyIndex: ownerId }
-    houses: {}      // Ev sayıları: { propertyIndex: count }
+    properties: {}, 
+    houses: {}      
 };
 
 io.on('connection', (socket) => {
-    console.log('Bir oyuncu bağlandı:', socket.id);
+    console.log('Bağlantı başarılı! ID:', socket.id);
 
-    // Yeni oyuncu oluştur
     players[socket.id] = {
         id: socket.id,
         color: getRandomColor(),
@@ -45,7 +51,6 @@ io.on('connection', (socket) => {
     };
     playerIds.push(socket.id);
 
-    // Mevcut durumu gönder
     socket.emit('init', { 
         id: socket.id, 
         players: players, 
@@ -53,12 +58,9 @@ io.on('connection', (socket) => {
         currentTurn: playerIds[currentPlayerIndex] 
     });
 
-    // Diğerlerine haber ver
     socket.broadcast.emit('playerJoined', players[socket.id]);
 
-    // Zar atma
     socket.on('rollDice', () => {
-        // Sıra kontrolü
         if (playerIds.length > 0 && socket.id !== playerIds[currentPlayerIndex]) return;
 
         const die1 = Math.floor(Math.random() * 6) + 1;
@@ -67,9 +69,8 @@ io.on('connection', (socket) => {
         const isDouble = die1 === die2;
 
         const player = players[socket.id];
-        if (!player) return; // Güvenlik kontrolü
-        
-        // Hapishane kontrolü (basitleştirilmiş)
+        if (!player) return;
+
         if (player.jail) {
             if (isDouble) {
                 player.jail = false;
@@ -80,23 +81,19 @@ io.on('connection', (socket) => {
             }
         }
 
-        // Hareket
         player.position = (player.position + total) % 40;
         
-        // Başlangıçtan geçme parası
         if (player.position < total && player.position !== 0) { 
              player.money += 200;
         }
 
         io.emit('diceResult', { die1, die2, move: true, playerId: socket.id, newPosition: player.position, money: player.money });
         
-        // Sıra yönetimi (Çift atarsa tekrar atar mantığı eklenebilir, burada basit tutuldu)
         if (!isDouble) {
             nextTurn();
         }
     });
 
-    // Mülk Satın Alma
     socket.on('buyProperty', (propertyIndex, price) => {
         const player = players[socket.id];
         if (player && player.money >= price && !gameState.properties[propertyIndex]) {
@@ -106,11 +103,9 @@ io.on('connection', (socket) => {
         }
     });
 
-    // Kira ödeme
     socket.on('payRent', (amount, ownerId) => {
         const player = players[socket.id];
         
-        // Bankaya ödeme (Vergi vb.)
         if (ownerId === 'bank') {
             if (player) {
                 player.money -= amount;
@@ -119,7 +114,6 @@ io.on('connection', (socket) => {
             return;
         }
 
-        // Oyuncuya ödeme
         const owner = players[ownerId];
         if (player && owner) {
             player.money -= amount;
@@ -133,15 +127,12 @@ io.on('connection', (socket) => {
         delete players[socket.id];
         playerIds = playerIds.filter(id => id !== socket.id);
         
-        // Eğer giden oyuncu sıradaki oyuncuysa sırayı kaydır
         if (currentPlayerIndex >= playerIds.length) {
             currentPlayerIndex = 0;
         }
         
-        // Oyuncu gittikten sonra kalanlara bildir
         io.emit('playerLeft', socket.id);
         
-        // Eğer oyun devam ediyorsa sırayı güncelle
         if (playerIds.length > 0) {
             io.emit('turnChange', playerIds[currentPlayerIndex]);
         }
@@ -160,5 +151,5 @@ function getRandomColor() {
 
 const PORT = process.env.PORT || 3000;
 http.listen(PORT, () => {
-    console.log(`Sunucu çalışıyor: http://localhost:${PORT}`);
+    console.log(`Sunucu çalışıyor port: ${PORT}`);
 });
