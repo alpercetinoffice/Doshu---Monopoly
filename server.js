@@ -38,48 +38,7 @@ const CHEST_CARDS = [
     { text: 'Insurance expired! Pay 50₺', money: -50 }
 ];
 
-const boardData = [
-    { type: 'corner', name: 'BAŞLANGIÇ', id: 0 },
-    { type: 'property', name: 'Kadıköy', price: 60, group: 'brown', housePrice: 50, rent: [2, 10, 30, 90, 160, 250], id: 1 },
-    { type: 'chest', name: 'Kamu Fonu', id: 2 },
-    { type: 'property', name: 'Moda', price: 60, group: 'brown', housePrice: 50, rent: [4, 20, 60, 180, 320, 450], id: 3 },
-    { type: 'tax', name: 'Gelir Vergisi', price: 200, id: 4 },
-    { type: 'railroad', name: 'Haydarpaşa', price: 200, rent: [25, 50, 100, 200], id: 5 },
-    { type: 'property', name: 'Beşiktaş', price: 100, group: 'lightblue', housePrice: 50, rent: [6, 30, 90, 270, 400, 550], id: 6 },
-    { type: 'chance', name: 'Şans', id: 7 },
-    { type: 'property', name: 'Ortaköy', price: 100, group: 'lightblue', housePrice: 50, rent: [6, 30, 90, 270, 400, 550], id: 8 },
-    { type: 'property', name: 'Bebek', price: 120, group: 'lightblue', housePrice: 50, rent: [8, 40, 100, 300, 450, 600], id: 9 },
-    { type: 'corner', name: 'HAPİSHANE', id: 10 },
-    { type: 'property', name: 'Şişli', price: 140, group: 'pink', housePrice: 100, rent: [10, 50, 150, 450, 625, 750], id: 11 },
-    { type: 'utility', name: 'Elektrik', price: 150, id: 12 },
-    { type: 'property', name: 'Mecidiyeköy', price: 140, group: 'pink', housePrice: 100, rent: [10, 50, 150, 450, 625, 750], id: 13 },
-    { type: 'property', name: 'Gayrettepe', price: 160, group: 'pink', housePrice: 100, rent: [12, 60, 180, 500, 700, 900], id: 14 },
-    { type: 'railroad', name: 'Sirkeci', price: 200, rent: [25, 50, 100, 200], id: 15 },
-    { type: 'property', name: 'Fatih', price: 180, group: 'orange', housePrice: 100, rent: [14, 70, 200, 550, 750, 950], id: 16 },
-    { type: 'chest', name: 'Kamu Fonu', id: 17 },
-    { type: 'property', name: 'Aksaray', price: 180, group: 'orange', housePrice: 100, rent: [14, 70, 200, 550, 750, 950], id: 18 },
-    { type: 'property', name: 'Eminönü', price: 200, group: 'orange', housePrice: 100, rent: [16, 80, 220, 600, 800, 1000], id: 19 },
-    { type: 'corner', name: 'ÜCRETSİZ OTOPARK', id: 20 },
-    { type: 'property', name: 'Taksim', price: 220, group: 'red', housePrice: 150, rent: [18, 90, 250, 700, 875, 1050], id: 21 },
-    { type: 'chance', name: 'Şans', id: 22 },
-    { type: 'property', name: 'İstiklal', price: 220, group: 'red', housePrice: 150, rent: [18, 90, 250, 700, 875, 1050], id: 23 },
-    { type: 'property', name: 'Beyoğlu', price: 240, group: 'red', housePrice: 150, rent: [20, 100, 300, 750, 925, 1100], id: 24 },
-    { type: 'railroad', name: 'Karaköy', price: 200, rent: [25, 50, 100, 200], id: 25 },
-    { type: 'property', name: 'Sarıyer', price: 260, group: 'yellow', housePrice: 150, rent: [22, 110, 330, 800, 975, 1150], id: 26 },
-    { type: 'property', name: 'Tarabya', price: 260, group: 'yellow', housePrice: 150, rent: [22, 110, 330, 800, 975, 1150], id: 27 },
-    { type: 'utility', name: 'Su İdaresi', price: 150, id: 28 },
-    { type: 'property', name: 'Yeniköy', price: 280, group: 'yellow', housePrice: 150, rent: [24, 120, 360, 850, 1025, 1200], id: 29 },
-    { type: 'corner', name: 'KODESE GİT', id: 30 },
-    { type: 'property', name: 'Etiler', price: 300, group: 'green', housePrice: 200, rent: [26, 130, 390, 900, 1100, 1275], id: 31 },
-    { type: 'property', name: 'Levent', price: 300, group: 'green', housePrice: 200, rent: [26, 130, 390, 900, 1100, 1275], id: 32 },
-    { type: 'chest', name: 'Kamu Fonu', id: 33 },
-    { type: 'property', name: 'Maslak', price: 320, group: 'green', housePrice: 200, rent: [28, 150, 450, 1000, 1200, 1400], id: 34 },
-    { type: 'railroad', name: 'Halkalı', price: 200, rent: [25, 50, 100, 200], id: 35 },
-    { type: 'chance', name: 'Şans', id: 36 },
-    { type: 'property', name: 'Nişantaşı', price: 350, group: 'darkblue', housePrice: 200, rent: [35, 175, 500, 1100, 1300, 1500], id: 37 },
-    { type: 'tax', name: 'Lüks Vergisi', price: 100, id: 38 },
-    { type: 'property', name: 'Maçka', price: 400, group: 'darkblue', housePrice: 200, rent: [50, 200, 600, 1400, 1700, 2000], id: 39 }
-];
+const boardData = require('./public/board_data.js');
 
 // === SOCKET HANDLERS ===
 io.on('connection', (socket) => {
@@ -363,8 +322,8 @@ http.listen(PORT, () => {
 ╔═══════════════════════════════════════╗
 ║   🎮 MONOPOLY GOLD EDITION 🎮         ║
 ╠═══════════════════════════════════════╣
-║   Port: ${PORT}                        ║
-║   Status: ✅ ONLINE                    ║
+║   Port: ${PORT}                       ║
+║   Status: ✅ ONLINE                   ║
 ║   Features: ✨ Full Premium           ║
 ╚═══════════════════════════════════════╝
     `);
