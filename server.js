@@ -12,38 +12,54 @@ app.use(express.static(path.join(__dirname, 'public')));
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 app.get('/health', (req, res) => res.status(200).send('OK'));
 
-// === VERİLER ===
+// === GAME DATA ===
 let rooms = {};
-const PLAYER_COLORS = ['#ff3838', '#17c0eb', '#3ae374', '#fff200', '#7158e2', '#ff9f43'];
+const PLAYER_COLORS = ['#e74c3c', '#3498db', '#2ecc71', '#f39c12', '#9b59b6', '#1abc9c'];
 
-// Board Data (Sunucu tarafı referansı)
-const boardData = require('./public/board_data.js'); 
-// (Eğer board_data.js yoksa hata vermemesi için basit require, ama dosyanın public'te olduğundan emin ol)
+const CHANCE_CARDS = [
+    { text: 'Bank pays you 200₺!', money: 200 },
+    { text: 'Your birthday! Collect 50₺ from each player!', type: 'birthday' },
+    { text: 'Speeding fine! Pay 100₺', money: -100 },
+    { text: 'Advance to GO and collect 200₺!', type: 'go' },
+    { text: 'Tax refund! Collect 150₺', money: 150 },
+    { text: 'Go to jail! Go directly to jail!', type: 'jail' },
+    { text: 'Pay 50₺ for each house you own!', type: 'maintenance' },
+    { text: 'Go back 3 spaces!', type: 'back3' }
+];
 
+const CHEST_CARDS = [
+    { text: 'Bank error in your favor! Collect 200₺', money: 200 },
+    { text: 'Doctor fees! Pay 100₺', money: -100 },
+    { text: 'You win a contest! Collect 100₺', money: 100 },
+    { text: 'School fees refund! Collect 50₺', money: 50 },
+    { text: 'Holiday fund! Collect 100₺', money: 100 },
+    { text: 'Go to jail! Directly to jail!', type: 'jail' },
+    { text: 'You inherit 100₺!', money: 100 },
+    { text: 'Insurance expired! Pay 50₺', money: -50 }
+];
+
+const boardData = require('./public/board_data.js');
+
+// === SOCKET HANDLERS ===
 io.on('connection', (socket) => {
-    console.log('✅ Yeni Bağlantı:', socket.id);
+    console.log('✅ New connection:', socket.id);
 
-    // ODA OLUŞTURMA
     socket.on('createRoom', (data) => {
-        let roomId;
-        do {
-            roomId = Math.random().toString(36).substring(2, 7).toUpperCase();
-        } while (rooms[roomId]); // Çakışma kontrolü
-
+        const roomId = Math.random().toString(36).substring(2, 7).toUpperCase();
+        
         rooms[roomId] = {
             id: roomId,
-            name: `${data.nickname}'in Masası`,
+            name: `${data.nickname}'s Room`,
             hostId: socket.id,
             hostName: data.nickname,
             players: [],
             status: 'LOBBY',
-            gameState: { properties: {}, turnIndex: 0, turnPlayerId: null }
+            gameState: { properties: {}, currentTurn: 0, turnPlayerId: null }
         };
 
         joinRoomLogic(socket, roomId, data.nickname, data.character);
     });
 
-    // ODA LİSTELEME
     socket.on('getRooms', () => {
         const list = Object.keys(rooms).map(id => ({
             id, name: rooms[id].name, count: rooms[id].players.length,
@@ -52,223 +68,263 @@ io.on('connection', (socket) => {
         socket.emit('roomList', list);
     });
 
-    // ODAYA KATILMA
     socket.on('joinRoom', (data) => {
         joinRoomLogic(socket, data.roomId, data.nickname, data.character);
     });
 
-    // OYUN BAŞLATMA
     socket.on('startGame', (roomId) => {
         const room = rooms[roomId];
-        if (!room || room.hostId !== socket.id) return;
+        if (!room || room.hostId !== socket.id || room.players.length < 2) {
+            return socket.emit('error', 'Cannot start game!');
+        }
 
-        // Başlangıç Ayarları
         room.players.forEach((p, i) => {
-            p.money = 1500;
             p.position = 0;
-            p.color = PLAYER_COLORS[i % PLAYER_COLORS.length];
+            p.money = 1500;
+            p.color = PLAYER_COLORS[i];
             p.properties = [];
+            p.houses = {};
             p.inJail = false;
             p.jailTurns = 0;
-            p.isBankrupt = false;
         });
 
         room.status = 'PLAYING';
         room.gameState.turnPlayerId = room.players[0].id;
-        
+
         io.to(roomId).emit('gameStarted', {
             players: room.players,
             currentTurn: room.gameState.turnPlayerId
         });
+
+        console.log(`🎮 Game started: ${roomId}`);
     });
 
-    // ZAR ATMA VE HAREKET
     socket.on('rollDice', (data) => {
         const roomId = findPlayerRoom(socket.id);
         if (!roomId) return;
+
         const room = rooms[roomId];
-        const player = room.players.find(p => p.id === socket.id);
-
-        if (room.gameState.turnPlayerId !== socket.id) return;
-
-        // Zar Hesapla
-        const d1 = Math.floor(Math.random() * 6) + 1;
-        const d2 = Math.floor(Math.random() * 6) + 1;
-        const total = d1 + d2;
-        const isDouble = d1 === d2;
-
-        // Hapis Kontrolü
-        if (player.inJail) {
-            if (isDouble || (data && data.tryJailEscape)) { // Çift attı veya şansını denedi
-                if(isDouble) {
-                    player.inJail = false;
-                    player.jailTurns = 0;
-                    movePlayer(room, player, total);
-                    io.to(roomId).emit('diceResult', { playerId: socket.id, d1, d2, move: true, msg: "Çift attın ve çıktın!" });
-                } else {
-                    player.jailTurns++;
-                    if(player.jailTurns >= 3) {
-                         // 3 tur oldu, zorla öde ve çık
-                        player.money -= 50;
-                        player.inJail = false;
-                        movePlayer(room, player, total);
-                        io.to(roomId).emit('diceResult', { playerId: socket.id, d1, d2, move: true, msg: "3 tur doldu, ceza ödendi." });
-                    } else {
-                        io.to(roomId).emit('diceResult', { playerId: socket.id, d1, d2, move: false, msg: "Çıkamadın." });
-                        nextTurn(roomId);
-                    }
-                }
-            }
-            return;
+        if (room.gameState.turnPlayerId !== socket.id) {
+            return socket.emit('error', 'Not your turn!');
         }
 
-        // Normal Hareket
-        io.to(roomId).emit('diceResult', { playerId: socket.id, d1, d2, move: true });
-        
-        // Animasyon süresi (2sn) sonra sonucu işle
-        setTimeout(() => {
-            movePlayer(room, player, total);
-            
-            // Eğer çift atmadıysa sıra değişir
-            if (!isDouble) {
-                setTimeout(() => nextTurn(roomId), 1500); // Olayları görmesi için bekleme
+        const player = room.players.find(p => p.id === socket.id);
+        const die1 = Math.floor(Math.random() * 6) + 1;
+        const die2 = Math.floor(Math.random() * 6) + 1;
+        const total = die1 + die2;
+        const isDoubles = die1 === die2;
+
+        // Jail handling
+        if (player.inJail) {
+            if (isDoubles) {
+                player.inJail = false;
+                player.jailTurns = 0;
+                io.to(roomId).emit('jailReleased', { playerId: socket.id });
+            } else {
+                player.jailTurns++;
+                if (player.jailTurns >= 3) {
+                    player.money -= 50;
+                    player.inJail = false;
+                    player.jailTurns = 0;
+                    io.to(roomId).emit('jailReleased', { playerId: socket.id });
+                } else {
+                    io.to(roomId).emit('diceResult', {
+                        playerId: socket.id, die1, die2, total,
+                        newPosition: player.position, money: player.money,
+                        wasInJail: true
+                    });
+                    if (!isDoubles) {
+                        setTimeout(() => changeTurn(roomId), 2000);
+                    }
+                    return;
+                }
             }
-        }, 2000);
+        }
+
+        const oldPos = player.position;
+        player.position = (player.position + total) % 40;
+
+        if (player.position < oldPos) {
+            player.money += 200;
+        }
+
+        // Check if landed on GO TO JAIL
+        if (player.position === 30) {
+            player.position = 10;
+            player.inJail = true;
+            player.jailTurns = 0;
+            io.to(roomId).emit('jailEntered', { playerId: socket.id, turns: 0 });
+        }
+
+        io.to(roomId).emit('diceResult', {
+            playerId: socket.id, die1, die2, total,
+            newPosition: player.position, money: player.money,
+            wasInJail: false
+        });
+
+        setTimeout(() => {
+            if (!player.inJail) {
+                handleTileAction(roomId, socket.id, player.position);
+            }
+        }, 1000);
+
+        if (!isDoubles && !player.inJail) {
+            setTimeout(() => changeTurn(roomId), 3000);
+        }
     });
 
-    // MÜLK SATIN ALMA
-    socket.on('buyProperty', (data) => {
+    socket.on('payBail', () => {
         const roomId = findPlayerRoom(socket.id);
+        if (!roomId) return;
+
         const room = rooms[roomId];
         const player = room.players.find(p => p.id === socket.id);
-        // Basit kontrol: Para yetiyor mu?
-        // (Gerçek veriyi boardData'dan almak lazım ama şimdilik client güveniyoruz, sen board_data.js'i server'a da koyarsan daha güvenli olur)
-        
-        if(player.money >= data.price) {
-            player.money -= data.price;
+
+        if (player.inJail && player.money >= 50) {
+            player.money -= 50;
+            player.inJail = false;
+            player.jailTurns = 0;
+            io.to(roomId).emit('jailReleased', { playerId: socket.id });
+        }
+    });
+
+    socket.on('buyProperty', (data) => {
+        const roomId = findPlayerRoom(socket.id);
+        if (!roomId) return;
+
+        const room = rooms[roomId];
+        const player = room.players.find(p => p.id === socket.id);
+        const tile = boardData[data.position];
+
+        if (player.money >= tile.price) {
+            player.money -= tile.price;
             player.properties.push(data.position);
             room.gameState.properties[data.position] = socket.id;
-            
-            io.to(roomId).emit('propertyBought', {
+
+            io.to(roomId).emit('propertyPurchased', {
                 playerId: socket.id,
                 position: data.position,
-                money: player.money,
-                price: data.price
+                money: player.money
             });
         }
     });
 
-    // HAPİS ÖDEME
-    socket.on('payBail', () => {
-        const roomId = findPlayerRoom(socket.id);
-        const p = rooms[roomId].players.find(p => p.id === socket.id);
-        if(p.money >= 50) {
-            p.money -= 50;
-            p.inJail = false;
-            p.jailTurns = 0;
-            io.to(roomId).emit('jailPaid', { playerId: socket.id });
-        }
-    });
-
-    // KOPMA YÖNETİMİ
     socket.on('disconnect', () => {
         const roomId = findPlayerRoom(socket.id);
         if (roomId) {
             const room = rooms[roomId];
-            // Oyuncu oyundaysa hemen silme, "disconnected" işaretle (Gelişmiş versiyon)
-            // Şimdilik basitçe siliyoruz ama host değişimi yapıyoruz
             room.players = room.players.filter(p => p.id !== socket.id);
-            
+
+            if (room.hostId === socket.id && room.players.length > 0) {
+                room.hostId = room.players[0].id;
+                room.players[0].isHost = true;
+            }
+
             if (room.players.length === 0) {
                 delete rooms[roomId];
             } else {
-                if(room.hostId === socket.id) {
-                    room.hostId = room.players[0].id;
-                    room.players[0].isHost = true;
-                }
                 io.to(roomId).emit('updateRoomPlayers', room.players);
             }
         }
     });
 });
 
-// YARDIMCI FONKSİYONLAR
-function joinRoomLogic(socket, roomId, nickname, charId) {
-    if (!rooms[roomId]) return socket.emit('error', 'Oda yok!');
-    if (rooms[roomId].players.length >= 6) return socket.emit('error', 'Oda dolu!');
+function joinRoomLogic(socket, roomId, nickname, character) {
+    if (!rooms[roomId]) return socket.emit('error', 'Room not found!');
+    if (rooms[roomId].players.length >= 6) return socket.emit('error', 'Room full!');
 
     socket.join(roomId);
     const newPlayer = {
-        id: socket.id,
-        name: nickname,
-        character: charId, // Karakter ID (resim için)
-        isHost: rooms[roomId].hostId === socket.id,
-        money: 1500
+        id: socket.id, name: nickname, character: character,
+        isHost: rooms[roomId].hostId === socket.id
     };
     rooms[roomId].players.push(newPlayer);
-    socket.emit('roomJoined', { roomId });
+
+    socket.emit('roomJoined', { roomId, isHost: newPlayer.isHost });
     io.to(roomId).emit('updateRoomPlayers', rooms[roomId].players);
 }
 
-function movePlayer(room, player, steps) {
-    const oldPos = player.position;
-    player.position = (player.position + steps) % 40;
+function findPlayerRoom(playerId) {
+    return Object.keys(rooms).find(id => rooms[id].players.find(p => p.id === playerId));
+}
 
-    // Başlangıçtan geçme
-    if(player.position < oldPos) {
-        player.money += 200;
-        io.to(room.id).emit('passGo', { playerId: player.id });
+function handleTileAction(roomId, playerId, position) {
+    const room = rooms[roomId];
+    const tile = boardData[position];
+    const player = room.players.find(p => p.id === playerId);
+
+    if (tile.type === 'property') {
+        const owner = room.gameState.properties[position];
+        
+        if (!owner) {
+            io.to(playerId).emit('propertyLanded', { position });
+        } else if (owner !== playerId) {
+            const ownerPlayer = room.players.find(p => p.id === owner);
+            const rent = tile.rent[0];
+
+            player.money -= rent;
+            ownerPlayer.money += rent;
+
+            io.to(roomId).emit('rentPaid', {
+                payerId: playerId, receiverId: owner, amount: rent,
+                payerMoney: player.money, receiverMoney: ownerPlayer.money
+            });
+        }
+    } else if (tile.type === 'chance') {
+        const card = CHANCE_CARDS[Math.floor(Math.random() * CHANCE_CARDS.length)];
+        handleCard(roomId, playerId, card, 'chance');
+    } else if (tile.type === 'chest') {
+        const card = CHEST_CARDS[Math.floor(Math.random() * CHEST_CARDS.length)];
+        handleCard(roomId, playerId, card, 'chest');
+    } else if (tile.type === 'tax') {
+        player.money -= tile.price;
     }
+}
 
-    // Kodes'e Git karesi (30. kare)
-    if(player.position === 30) {
+function handleCard(roomId, playerId, card, type) {
+    const room = rooms[roomId];
+    const player = room.players.find(p => p.id === playerId);
+
+    if (card.money) {
+        player.money += card.money;
+    } else if (card.type === 'jail') {
         player.position = 10;
         player.inJail = true;
         player.jailTurns = 0;
-        io.to(room.id).emit('jailEntered', { playerId: player.id });
-    } else {
-        // İstemciye güncelleme at
-        io.to(room.id).emit('playerMoved', { 
-            playerId: player.id, 
-            position: player.position, 
-            money: player.money 
+        io.to(roomId).emit('jailEntered', { playerId, turns: 0 });
+    } else if (card.type === 'go') {
+        player.position = 0;
+        player.money += 200;
+    } else if (card.type === 'birthday') {
+        room.players.forEach(p => {
+            if (p.id !== playerId) {
+                p.money -= 50;
+                player.money += 50;
+            }
         });
-        
-        // Tapu/Kira kontrolü için istemciyi tetikle (Logic serverda olmalı ama şimdilik hibrit)
-        // Burada basitçe: Eğer sahipli bir yerse kira kes, değilse satın alma sor
-        checkTile(room, player);
     }
+
+    io.to(roomId).emit('cardDrawn', { playerId, type, text: card.text });
 }
 
-function checkTile(room, player) {
-    const pos = player.position;
-    const ownerId = room.gameState.properties[pos];
-
-    if(ownerId && ownerId !== player.id) {
-        // Kira öde
-        const owner = room.players.find(p => p.id === ownerId);
-        if(owner) {
-            // Basit kira (geliştirilebilir)
-            const rent = 50; // Standart kira, boardData'dan çekilmeli
-            player.money -= rent;
-            owner.money += rent;
-            io.to(room.id).emit('rentPaid', { payer: player.id, receiver: owner.id, amount: rent });
-        }
-    }
-}
-
-function nextTurn(roomId) {
+function changeTurn(roomId) {
     const room = rooms[roomId];
-    if(!room) return;
-    const currentIdx = room.players.findIndex(p => p.id === room.gameState.turnPlayerId);
-    const nextIdx = (currentIdx + 1) % room.players.length;
-    room.gameState.turnPlayerId = room.players[nextIdx].id;
+    const currentIndex = room.players.findIndex(p => p.id === room.gameState.turnPlayerId);
+    const nextIndex = (currentIndex + 1) % room.players.length;
+    room.gameState.turnPlayerId = room.players[nextIndex].id;
+
     io.to(roomId).emit('turnChange', room.gameState.turnPlayerId);
 }
 
-function findPlayerRoom(id) {
-    return Object.keys(rooms).find(rid => rooms[rid].players.find(p => p.id === id));
-}
-
 const PORT = process.env.PORT || 3000;
-http.listen(PORT, () => console.log(`Sunucu ${PORT} portunda aktif.`));
+http.listen(PORT, () => {
+    console.log(`
+╔═══════════════════════════════════════╗
+║   🎮 MONOPOLY GOLD EDITION 🎮         ║
+╠═══════════════════════════════════════╣
+║   Port: ${PORT}                       ║
+║   Status: ✅ ONLINE                   ║
+║   Features: ✨ Full Premium           ║
+╚═══════════════════════════════════════╝
+    `);
+});
