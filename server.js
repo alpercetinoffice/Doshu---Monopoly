@@ -1,25 +1,23 @@
 const express = require('express');
 const app = express();
 const http = require('http').createServer(app);
-const io = require('socket.io')(http, {
-    cors: {
-        origin: "*", // TÜM SİTELERDEN GELEN BAĞLANTILARI KABUL ET (ÖNEMLİ)
-        methods: ["GET", "POST"]
-    }
-});
 const path = require('path');
 const boardData = require('./public/board_data');
 
-app.use(express.static(path.join(__dirname, 'public')));
-
-app.get('/', (req, res) => {
-    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+// CORS Ayarı (Bağlantı sorunlarını çözer)
+const io = require('socket.io')(http, {
+    cors: {
+        origin: "*",
+        methods: ["GET", "POST"]
+    }
 });
 
-// === OYUN SİSTEMİ ===
+app.use(express.static(path.join(__dirname, 'public')));
+app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
+
 let rooms = {};
 
-// Oda listesini formatla
+// Oda listesini hazırla
 const getRoomList = () => {
     return Object.values(rooms).map(r => ({
         id: r.id,
@@ -47,17 +45,20 @@ const getNextTurn = (room) => {
 };
 
 io.on('connection', (socket) => {
-    console.log('🔗 Yeni Bağlantı:', socket.id);
+    console.log('Bağlandı:', socket.id);
 
-    // Bağlanır bağlanmaz oda listesini gönder
+    // İlk bağlanışta oda listesini gönder
     socket.emit('roomList', getRoomList());
 
     socket.on('getRooms', () => {
         socket.emit('roomList', getRoomList());
     });
 
+    // --- ODA OLUŞTURMA ---
     socket.on('createRoom', ({ nickname, avatar }) => {
-        const roomId = Math.random().toString(36).substr(2, 5).toUpperCase();
+        // 5 Haneli Rastgele Oda Kodu Üret
+        const roomId = Math.random().toString(36).substring(2, 7).toUpperCase();
+        
         rooms[roomId] = {
             id: roomId,
             players: [createPlayer(socket.id, nickname, avatar)],
@@ -66,22 +67,33 @@ io.on('connection', (socket) => {
             boardState: {}, 
             logs: []
         };
+        
         socket.join(roomId);
-        socket.emit('roomJoined', { roomId, isHost: true });
-        // Tüm herkese güncel listeyi at
+        
+        // ÖNEMLİ: İstemciye roomId'yi açıkça gönderiyoruz
+        socket.emit('roomJoined', { roomId: roomId, isHost: true });
+        
+        // Herkese listeyi güncelle
         io.emit('roomList', getRoomList());
     });
 
+    // --- ODAYA KATILMA ---
     socket.on('joinRoom', ({ roomId, nickname, avatar }) => {
-        const room = rooms[roomId];
+        // roomId bazen boşluklu gelebilir, temizle
+        const cleanId = roomId ? roomId.trim().toUpperCase() : null;
+        const room = rooms[cleanId];
+
         if (room && room.status === 'LOBBY' && room.players.length < 4) {
             room.players.push(createPlayer(socket.id, nickname, avatar));
-            socket.join(roomId);
-            socket.emit('roomJoined', { roomId, isHost: false });
-            io.to(roomId).emit('updateLobby', room);
+            socket.join(cleanId);
+            
+            // ÖNEMLİ: İstemciye roomId'yi gönder
+            socket.emit('roomJoined', { roomId: cleanId, isHost: false });
+            
+            io.to(cleanId).emit('updateLobby', room);
             io.emit('roomList', getRoomList());
         } else {
-            socket.emit('error', 'Oda bulunamadı veya dolu.');
+            socket.emit('error', 'Oda bulunamadı, dolu veya oyun başlamış.');
         }
     });
 
@@ -155,8 +167,7 @@ io.on('connection', (socket) => {
     socket.on('endTurn', (roomId) => { endTurn(roomId); });
     
     socket.on('disconnect', () => {
-        // Kopan oyuncuları temizleme mantığı eklenebilir
-        console.log('Kullanıcı ayrıldı:', socket.id);
+        // Kopanları temizleme eklenebilir
     });
 });
 
