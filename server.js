@@ -11,17 +11,21 @@ const io = require('socket.io')(http, {
 app.use(express.static(path.join(__dirname, 'public')));
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
+// GLOBAL DEĞİŞKENLER
 let rooms = {};
+const TURN_TIME_LIMIT = 30; // Saniye
+
+// --- YARDIMCI FONKSİYONLAR ---
 
 const createPlayer = (id, name, avatar) => ({
     id, name, avatar,
-    money: 1500000, // YENİ BAŞLANGIÇ PARASI (1.5M)
+    money: 1500000, // 1.5M Başlangıç
     position: 0,
     color: '#' + Math.floor(Math.random()*16777215).toString(16),
     properties: [],
     inJail: false,
     jailTurns: 0,
-    isBankrupt: false // İflas durumu eklendi
+    isBankrupt: false
 });
 
 const getRoomList = () => {
@@ -36,14 +40,13 @@ const getRoomList = () => {
 };
 
 const getNextTurn = (room) => {
-    // Sadece iflas etmemiş oyuncular arasında dön
     const activePlayers = room.players.filter(p => !p.isBankrupt);
     if (activePlayers.length === 0) return null;
 
     let currentIndex = room.players.findIndex(p => p.id === room.turn);
     let nextIndex = (currentIndex + 1) % room.players.length;
     
-    // Sıradaki kişi iflas etmişse atla
+    // İflas etmiş oyuncuları atla
     while (room.players[nextIndex].isBankrupt) {
         nextIndex = (nextIndex + 1) % room.players.length;
     }
@@ -51,36 +54,70 @@ const getNextTurn = (room) => {
     return room.players[nextIndex].id;
 };
 
-// === İFLAS ve OYUN SONU MANTIĞI ===
+// --- TIMER YÖNETİMİ (YENİ) ---
+const startTurnTimer = (roomId) => {
+    const room = rooms[roomId];
+    if (!room || room.status !== 'PLAYING') return;
+
+    // Varsa eski sayacı temizle
+    if (room.timer) clearInterval(room.timer);
+
+    room.timeLeft = TURN_TIME_LIMIT;
+    
+    // İlk süreyi gönder
+    io.to(roomId).emit('timerUpdate', { timeLeft: room.timeLeft, turnId: room.turn });
+
+    room.timer = setInterval(() => {
+        room.timeLeft--;
+        
+        // Her saniye güncelleme göndermek yerine kritik zamanlarda veya 5 saniyede bir gönder
+        // (Ağ trafiğini azaltmak için)
+        if(room.timeLeft % 5 === 0 || room.timeLeft <= 10) {
+             io.to(roomId).emit('timerUpdate', { timeLeft: room.timeLeft, turnId: room.turn });
+        }
+
+        if (room.timeLeft <= 0) {
+            clearInterval(room.timer);
+            handleAutoPass(roomId);
+        }
+    }, 1000);
+};
+
+const handleAutoPass = (roomId) => {
+    const room = rooms[roomId];
+    if (!room) return;
+    
+    const player = room.players.find(p => p.id === room.turn);
+    if (player) {
+        io.to(roomId).emit('log', `⏳ Süre doldu! ${player.name} pas geçildi.`);
+        endTurn(roomId);
+    }
+};
+
+// --- OYUN MANTIĞI (İFLAS & KAZANMA) ---
+
 const handleBankruptcy = (room, debtor, creditorId = null) => {
-    console.log(`💸 İFLAS: ${debtor.name} iflas etti!`);
+    console.log(`💸 İFLAS: ${debtor.name}`);
     debtor.isBankrupt = true;
     debtor.money = 0;
 
-    // Varlıkları temizle veya devret
     if (creditorId) {
-        // Alacaklıya devret (Oyuncuya borçlu battıysa)
         const creditor = room.players.find(p => p.id === creditorId);
         if (creditor) {
             debtor.properties.forEach(propIndex => {
                 room.boardState[propIndex] = creditor.id;
                 creditor.properties.push(propIndex);
-                // Tapu transferini görselleştir (Client tarafında halledilecek)
             });
-            creditor.money += debtor.money; // Kalan kuruşları da ver
-            io.to(room.id).emit('log', `${debtor.name} iflas etti! Tüm malları ${creditor.name}'e geçti.`);
+            creditor.money += debtor.money;
+            io.to(room.id).emit('log', `${debtor.name} iflas etti! Malları ${creditor.name}'e geçti.`);
         }
     } else {
-        // Bankaya battıysa (Vergi vb.)
-        debtor.properties.forEach(propIndex => {
-            delete room.boardState[propIndex]; // Mülk boşa çıkar
-        });
+        debtor.properties.forEach(propIndex => delete room.boardState[propIndex]);
         io.to(room.id).emit('log', `${debtor.name} iflas etti! Malları bankaya döndü.`);
     }
 
-    debtor.properties = []; // Mülk listesini boşalt
+    debtor.properties = [];
     
-    // İstemciye bildir (Oyuncuyu gri yap, mülkleri güncelle)
     io.to(room.id).emit('playerBankrupt', { 
         bankruptId: debtor.id, 
         creditorId: creditorId,
@@ -92,19 +129,20 @@ const handleBankruptcy = (room, debtor, creditorId = null) => {
 
 const checkWinCondition = (room) => {
     const activePlayers = room.players.filter(p => !p.isBankrupt);
-    
     if (activePlayers.length === 1 && room.players.length > 1) {
-        // KAZANAN BELLİ!
         const winner = activePlayers[0];
         room.status = 'FINISHED';
+        if(room.timer) clearInterval(room.timer); // Sayacı durdur
+        
         io.to(room.id).emit('gameOver', { 
             winnerName: winner.name, 
             winnerAvatar: winner.avatar,
             winnerMoney: winner.money
         });
-        console.log(`🏆 OYUN BİTTİ! Kazanan: ${winner.name}`);
     }
 };
+
+// --- SOCKET EVENTS ---
 
 io.on('connection', (socket) => {
     socket.emit('roomList', getRoomList());
@@ -118,7 +156,8 @@ io.on('connection', (socket) => {
             status: 'LOBBY',
             turn: null,
             boardState: {}, 
-            logs: []
+            logs: [],
+            timeLeft: TURN_TIME_LIMIT
         };
         socket.join(roomId);
         socket.emit('roomJoined', { roomId: roomId, isHost: true });
@@ -134,7 +173,7 @@ io.on('connection', (socket) => {
             io.to(roomId).emit('updateLobby', room);
             io.emit('roomList', getRoomList());
         } else {
-            socket.emit('error', 'Hata: Oda yok veya dolu.');
+            socket.emit('error', 'Oda yok veya dolu.');
         }
     });
 
@@ -145,56 +184,61 @@ io.on('connection', (socket) => {
             room.turn = room.players[0].id;
             io.to(roomId).emit('gameStarted', room);
             io.emit('roomList', getRoomList());
+            startTurnTimer(roomId); // SAYAÇ BAŞLAT
         }
     });
 
     socket.on('rollDice', (roomId) => {
         const room = rooms[roomId];
         if (!room || room.turn !== socket.id) return;
+        
+        // ZAR ATILDIĞI AN SAYACI DURDUR (Animasyon süresince timeout olmasın)
+        if(room.timer) clearInterval(room.timer);
 
-        const p = room.players.find(p => p.id === socket.id);
-        if (p.isBankrupt) return; // İflas eden oynayamaz
+        const player = room.players.find(p => p.id === socket.id);
+        if (player.isBankrupt) return;
 
         const die1 = Math.floor(Math.random() * 6) + 1;
         const die2 = Math.floor(Math.random() * 6) + 1;
-        // const die1 = 100; const die2 = 0; // Hızlı test için hile (kaldır)
         const total = die1 + die2;
 
         io.to(roomId).emit('diceRolled', { die1, die2, playerId: socket.id });
         
-        // --- HAPİS MANTIĞI ---
-        if (p.inJail) {
+        if (player.inJail) {
              if (die1 === die2) {
-                p.inJail = false; p.jailTurns = 0;
-                io.to(roomId).emit('log', `${p.name} çift attı ve çıktı!`);
-                movePlayer(room, p, total);
+                player.inJail = false; player.jailTurns = 0;
+                io.to(roomId).emit('log', `${player.name} çift attı ve çıktı!`);
+                movePlayer(room, player, total);
             } else {
-                p.jailTurns++;
-                if (p.jailTurns >= 3) {
-                    if (p.money >= 50000) {
-                        p.money -= 50000;
-                        p.inJail = false;
-                        io.to(roomId).emit('log', `${p.name} kefalet (50K) ödeyip çıktı.`);
-                        movePlayer(room, p, total);
+                player.jailTurns++;
+                if (player.jailTurns >= 3) {
+                    if (player.money >= 50000) {
+                        player.money -= 50000;
+                        player.inJail = false;
+                        io.to(roomId).emit('log', `${player.name} kefaletle çıktı.`);
+                        movePlayer(room, player, total);
                     } else {
-                        // Parası yoksa iflas (Bankaya)
-                        handleBankruptcy(room, p, null);
-                        endTurn(room);
+                        handleBankruptcy(room, player, null);
+                        endTurn(roomId);
                         return;
                     }
                 } else {
-                    io.to(roomId).emit('log', `${p.name} hapiste kaldı.`);
-                    endTurn(room);
+                    io.to(roomId).emit('log', `${player.name} hapiste kaldı.`);
+                    endTurn(roomId);
                 }
             }
         } else {
-            movePlayer(room, p, total);
-            if (!p.isBankrupt) {
+            movePlayer(room, player, total);
+            
+            if (!player.isBankrupt) {
                 if (die1 === die2) {
-                     io.to(roomId).emit('log', `${p.name} çift attı!`);
+                     io.to(roomId).emit('log', `${player.name} çift attı!`);
                      io.to(roomId).emit('allowReRoll');
+                     // Çift atarsa tekrar süre başlat
+                     startTurnTimer(roomId);
                 } else {
-                    setTimeout(() => endTurn(room), 1500);
+                    // Animasyon payı bırakıp sırayı devret
+                    setTimeout(() => endTurn(roomId), 1500);
                 }
             }
         }
@@ -202,7 +246,8 @@ io.on('connection', (socket) => {
 
     socket.on('buyProperty', (roomId) => {
         const room = rooms[roomId];
-        if (!room) return;
+        if (!room || room.turn !== socket.id) return;
+        
         const p = room.players.find(x => x.id === socket.id);
         const tile = boardData[p.position];
 
@@ -210,15 +255,17 @@ io.on('connection', (socket) => {
             p.money -= tile.price;
             p.properties.push(p.position);
             room.boardState[p.position] = p.id;
+            
             io.to(roomId).emit('propertyBought', { playerId: p.id, tileIndex: p.position, money: p.money });
             io.to(roomId).emit('log', `${p.name}, ${tile.name} tapusunu aldı.`);
-            endTurn(room);
+            endTurn(roomId);
         }
     });
 
-    socket.on('endTurn', (roomId) => { 
-        const room = rooms[roomId];
-        if(room) endTurn(room); 
+    socket.on('endTurn', (roomId) => endTurn(roomId));
+    
+    socket.on('disconnect', () => {
+        // İleride buraya Reconnect eklenecek
     });
 });
 
@@ -226,79 +273,67 @@ function movePlayer(room, player, steps) {
     const oldPos = player.position;
     player.position = (player.position + steps) % 40;
 
-    // Başlangıç parası
     if (player.position < oldPos) {
-        player.money += 200000; // 200K
+        player.money += 200000;
         io.to(room.id).emit('moneyUpdate', { playerId: player.id, money: player.money });
         io.to(room.id).emit('log', `${player.name} turu tamamladı (+200K).`);
     }
 
-    if (player.position === 30) { // Hapse Git
+    if (player.position === 30) {
         player.position = 10;
         player.inJail = true;
         io.to(room.id).emit('playerMoved', { playerId: player.id, position: 10 });
         io.to(room.id).emit('log', `${player.name} Hapse girdi!`);
-        endTurn(room);
+        endTurn(room.id);
         return;
     }
 
     io.to(room.id).emit('playerMoved', { playerId: player.id, position: player.position });
     
-    // Kareyi kontrol et
     const tile = boardData[player.position];
     
-    // 1. MÜLK
     if (['property', 'station', 'utility'].includes(tile.type)) {
         const ownerId = room.boardState[player.position];
-        
         if (ownerId && ownerId !== player.id) {
-            // KİRA ÖDEME
             const owner = room.players.find(p => p.id === ownerId);
             const rent = tile.rent || 10000; 
             
-            // Para yetiyor mu?
             if (player.money >= rent) {
                 player.money -= rent;
                 owner.money += rent;
                 io.to(room.id).emit('moneyUpdate', { playerId: player.id, money: player.money });
                 io.to(room.id).emit('moneyUpdate', { playerId: owner.id, money: owner.money });
-                io.to(room.id).emit('log', `${player.name}, ${owner.name}'e ${rent}₺ kira ödedi.`);
+                io.to(room.id).emit('log', `${player.name}, ${rent}₺ kira ödedi.`);
             } else {
-                // YETMİYOR -> İFLAS (Kişiye)
-                io.to(room.id).emit('log', `${player.name}, ${rent}₺ kirayı ödeyemedi!`);
                 handleBankruptcy(room, player, owner.id);
             }
-
         } else if (!ownerId) {
-            // Satın alma teklifi
-            if (player.money >= tile.price) {
-                io.to(player.id).emit('offerBuy', tile);
-            } else {
-                 io.to(room.id).emit('log', `${player.name} burayı alacak parası yok.`);
-            }
+            if (player.money >= tile.price) io.to(player.id).emit('offerBuy', tile);
         }
-    
-    // 2. VERGİ
     } else if (tile.type === 'tax') {
         if (player.money >= tile.price) {
             player.money -= tile.price;
             io.to(room.id).emit('moneyUpdate', { playerId: player.id, money: player.money });
-            io.to(room.id).emit('log', `${player.name} ${tile.price}₺ vergi ödedi.`);
         } else {
-            // YETMİYOR -> İFLAS (Bankaya)
             handleBankruptcy(room, player, null);
         }
     }
 }
 
-function endTurn(room) {
+function endTurn(roomId) {
+    const room = rooms[roomId];
+    if(!room) return;
+    
+    // Eski sayacı durdur
+    if(room.timer) clearInterval(room.timer);
+
     room.turn = getNextTurn(room);
+    
     if (room.turn) {
         io.to(room.id).emit('turnChanged', room.turn);
-    } else {
-        // Herkes batmışsa veya oyun bitmişse
-        console.log("Sıra geçecek kimse kalmadı.");
+        startTurnTimer(roomId); // YENİ OYUNCU İÇİN SAYAÇ BAŞLAT
     }
 }
 
-http.listen(PORT, () => console.log(`🚀 Server updated (Prices & Bankruptcy) on port ${PORT}`));
+const PORT = process.env.PORT || 3000;
+http.listen(PORT, () => console.log(`🚀 Server Running on ${PORT}`));
