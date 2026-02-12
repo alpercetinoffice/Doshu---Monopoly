@@ -1,217 +1,230 @@
 const express = require('express');
-const app = express();
-const http = require('http').createServer(app);
-const io = require('socket.io')(http);
-const path = require('path');
-const boardData = require('./board_data');
+const http = require('http');
+const { Server } = require("socket.io");
+const BOARD = require('./gameData');
 
-app.use(express.static(path.join(__dirname, 'public')));
-app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
+const app = express();
+const server = http.createServer(app);
+const io = new Server(server, { cors: { origin: "*" } });
+
+app.use(express.static('public'));
 
 let rooms = {};
 
-// Oyun Durumu Yardımcıları
+// Oyuncu Modeli
 const createPlayer = (id, name, avatar) => ({
     id, name, avatar,
     money: 1500,
     position: 0,
-    color: '#' + Math.floor(Math.random()*16777215).toString(16),
+    color: getRandomColor(),
     properties: [],
     inJail: false,
     jailTurns: 0,
     isEliminated: false
 });
 
-const getNextPlayerId = (room) => {
-    let currentIdx = room.players.findIndex(p => p.id === room.turn);
-    let nextIdx = (currentIdx + 1) % room.players.length;
-    // Elenen oyuncuları atla
-    while(room.players[nextIdx].isEliminated) {
-        nextIdx = (nextIdx + 1) % room.players.length;
-    }
-    return room.players[nextIdx].id;
-};
+function getRandomColor() {
+    const colors = ['#e74c3c', '#3498db', '#2ecc71', '#f1c40f', '#9b59b6', '#e67e22'];
+    return colors[Math.floor(Math.random() * colors.length)];
+}
 
 io.on('connection', (socket) => {
-    console.log('Kullanıcı bağlandı:', socket.id);
-
-    socket.on('createRoom', ({ name, avatar }) => {
-        const roomId = Math.random().toString(36).substr(2, 5).toUpperCase();
+    
+    // --- ODA YÖNETİMİ ---
+    socket.on('createRoom', ({ nickname, avatar }) => {
+        const roomId = Math.random().toString(36).substring(2, 7).toUpperCase();
         rooms[roomId] = {
             id: roomId,
-            players: [createPlayer(socket.id, name, avatar)],
-            status: 'LOBBY',
-            turn: null,
-            boardState: {}, // Mülk sahipliği: { index: ownerId }
+            players: [createPlayer(socket.id, nickname, avatar)],
+            status: 'LOBBY', // LOBBY, PLAYING, FINISHED
+            turnIndex: 0,
+            boardOwner: {}, // { tileId: playerId }
             logs: []
         };
         socket.join(roomId);
-        socket.emit('roomCreated', roomId);
+        socket.emit('roomJoined', { roomId, isHost: true });
         io.to(roomId).emit('updateLobby', rooms[roomId]);
     });
 
-    socket.on('joinRoom', ({ roomId, name, avatar }) => {
-        const room = rooms[roomId];
-        if (room && room.status === 'LOBBY' && room.players.length < 4) {
-            room.players.push(createPlayer(socket.id, name, avatar));
-            socket.join(roomId);
-            io.to(roomId).emit('updateLobby', room);
-        } else {
-            socket.emit('error', 'Oda dolu veya oyun başlamış.');
-        }
+    socket.on('joinRoom', ({ roomId, nickname, avatar }) => {
+        if (!rooms[roomId]) return socket.emit('error', 'Oda bulunamadı!');
+        if (rooms[roomId].status !== 'LOBBY') return socket.emit('error', 'Oyun çoktan başladı!');
+        if (rooms[roomId].players.length >= 4) return socket.emit('error', 'Oda dolu!');
+
+        const player = createPlayer(socket.id, nickname, avatar);
+        rooms[roomId].players.push(player);
+        socket.join(roomId);
+        socket.emit('roomJoined', { roomId, isHost: false });
+        io.to(roomId).emit('updateLobby', rooms[roomId]);
     });
 
     socket.on('startGame', (roomId) => {
-        const room = rooms[roomId];
-        if (room && room.players[0].id === socket.id) {
-            room.status = 'PLAYING';
-            room.turn = room.players[0].id;
-            io.to(roomId).emit('gameStarted', room);
+        if (rooms[roomId] && rooms[roomId].players[0].id === socket.id) {
+            rooms[roomId].status = 'PLAYING';
+            io.to(roomId).emit('gameStarted', { 
+                players: rooms[roomId].players, 
+                board: BOARD,
+                turn: rooms[roomId].players[0].id 
+            });
+            log(roomId, "Oyun Başladı! İyi şanslar...");
         }
     });
 
+    // --- OYUN MANTIĞI ---
     socket.on('rollDice', (roomId) => {
         const room = rooms[roomId];
-        if (!room || room.turn !== socket.id) return;
+        if (!room || room.status !== 'PLAYING') return;
+        
+        const player = room.players[room.turnIndex];
+        if (player.id !== socket.id) return;
 
+        // Zar Atma
         const die1 = Math.floor(Math.random() * 6) + 1;
         const die2 = Math.floor(Math.random() * 6) + 1;
         const total = die1 + die2;
-        const player = room.players.find(p => p.id === socket.id);
+        const isDouble = die1 === die2;
 
-        io.to(roomId).emit('diceRolled', { die1, die2, playerId: socket.id });
+        io.to(roomId).emit('diceResult', { die1, die2, playerId: socket.id });
 
         // Hapis Mantığı
         if (player.inJail) {
-            if (die1 === die2) {
+            if (isDouble) {
                 player.inJail = false;
                 player.jailTurns = 0;
+                log(roomId, `${player.name} çift atarak hapisten çıktı!`);
                 movePlayer(roomId, player, total);
             } else {
                 player.jailTurns++;
-                if (player.jailTurns >= 3) {
+                if(player.jailTurns >= 3) {
                     player.money -= 50;
                     player.inJail = false;
+                    player.jailTurns = 0;
+                    log(roomId, `${player.name} cezasını ödeyip hapisten çıktı.`);
                     movePlayer(roomId, player, total);
                 } else {
-                    io.to(roomId).emit('log', `${player.name} hapiste kaldı.`);
-                    endTurn(roomId, false); // Çift atsa bile hapiste olduğu için tekrar atamaz
+                    log(roomId, `${player.name} hapiste kaldı.`);
+                    endTurn(roomId);
                 }
             }
         } else {
-            // Çift atarsa tekrar oynar
-            const isDoubles = die1 === die2;
-            movePlayer(roomId, player, total, isDoubles);
+            movePlayer(roomId, player, total);
+            // Çift gelirse tekrar oynama hakkı (basitleştirilmiş: sonsuz döngü koruması yok)
+            if (isDouble && !player.inJail) {
+                log(roomId, `${player.name} çift attı, tekrar oynayacak!`);
+                // Turu değiştirme, tekrar bekle
+                return; 
+            }
         }
     });
 
     socket.on('buyProperty', (roomId) => {
         const room = rooms[roomId];
-        if (!room || room.turn !== socket.id) return;
-        
         const player = room.players.find(p => p.id === socket.id);
-        const tile = boardData[player.position];
-        
-        if (tile.price && player.money >= tile.price && !room.boardState[player.position]) {
+        const tile = BOARD[player.position];
+
+        if (tile.price && player.money >= tile.price && !room.boardOwner[tile.id]) {
             player.money -= tile.price;
-            player.properties.push(player.position);
-            room.boardState[player.position] = player.id;
-            io.to(roomId).emit('propertyBought', { playerId: player.id, tileIndex: player.position, money: player.money });
-            io.to(roomId).emit('log', `${player.name}, ${tile.name} mülkünü satın aldı.`);
+            player.properties.push(tile.id);
+            room.boardOwner[tile.id] = player.id;
+            
+            io.to(roomId).emit('propertyBought', { 
+                tileId: tile.id, 
+                playerId: player.id, 
+                money: player.money 
+            });
+            log(roomId, `${player.name}, ${tile.name} tapusunu aldı!`);
+            endTurn(roomId);
         }
-        endTurn(roomId, false); // Satın alınca tur biter
     });
 
     socket.on('endTurn', (roomId) => {
-        endTurn(roomId, false);
+        endTurn(roomId);
+    });
+
+    socket.on('disconnect', () => {
+        // Basit kopma yönetimi: Odayı temizle (Geliştirilebilir)
+        for(let rid in rooms) {
+            rooms[rid].players = rooms[rid].players.filter(p => p.id !== socket.id);
+            io.to(rid).emit('updateLobby', rooms[rid]);
+        }
     });
 });
 
-function movePlayer(roomId, player, steps, isDoubles = false) {
+function movePlayer(roomId, player, steps) {
+    const room = rooms[roomId];
     const oldPos = player.position;
     player.position = (player.position + steps) % 40;
 
-    // Başlangıçtan geçiş
+    // Başlangıçtan geçme
     if (player.position < oldPos) {
         player.money += 200;
-        io.to(roomId).emit('log', `${player.name} Başlangıçtan geçti, 200₺ aldı.`);
+        log(roomId, `${player.name} başlangıçtan geçti, 200₺ kazandı.`);
     }
 
-    // Hapse Gir
+    // Hapse Girme
     if (player.position === 30) {
         player.position = 10;
         player.inJail = true;
-        isDoubles = false; // Hapse giren tekrar atamaz
-        io.to(roomId).emit('log', `${player.name} Hapse girdi!`);
+        log(roomId, `${player.name} HAPSE GİRDİ!`);
+        io.to(roomId).emit('playerMoved', { playerId: player.id, position: 10, money: player.money });
+        endTurn(roomId);
+        return;
     }
 
     io.to(roomId).emit('playerMoved', { playerId: player.id, position: player.position, money: player.money });
-    
-    // Olayı işle (Kira, Vergi vb.)
-    handleTileEvent(roomId, player, isDoubles);
-}
 
-function handleTileEvent(roomId, player, isDoubles) {
-    const tile = boardData[player.position];
-    const room = rooms[roomId];
-    let canEndTurn = true;
+    // Gittiği yerin analizi
+    const tile = BOARD[player.position];
+    let autoEndTurn = true;
 
-    // 1. Mülk Sahibi Var mı?
+    // Mülk Kontrolü
     if (['property', 'station', 'utility'].includes(tile.type)) {
-        const ownerId = room.boardState[player.position];
+        const ownerId = room.boardOwner[tile.id];
         if (ownerId && ownerId !== player.id) {
-            // Kira Öde
+            // Kira öde
             const owner = room.players.find(p => p.id === ownerId);
-            let rent = tile.rent || 0;
-            // İstasyonda sahip olunan sayıya göre kira artar (basitleştirilmiş)
-            if(tile.group === 'station') {
-                 const stationCount = owner.properties.filter(idx => boardData[idx].group === 'station').length;
-                 rent = 25 * Math.pow(2, stationCount - 1);
-            }
-            
+            let rent = tile.rent[0] || 10; // Basitleştirilmiş kira
             player.money -= rent;
             owner.money += rent;
-            io.to(roomId).emit('rentPaid', { payerId: player.id, receiverId: owner.id, amount: rent });
-            io.to(roomId).emit('log', `${player.name}, ${owner.name}'e ${rent}₺ kira ödedi.`);
+            log(roomId, `${player.name}, ${owner.name}'e ${rent}₺ kira ödedi.`);
+            io.to(roomId).emit('moneyUpdate', { players: room.players });
         } else if (!ownerId) {
-            // Satın Alma Seçeneği Sun
-            io.to(player.id).emit('offerBuy', tile);
-            canEndTurn = false; // Oyuncu karar verene kadar tur bitmez (otomatik değilse)
+            // Satın alma teklifi sun
+            io.to(player.id).emit('offerProperty', tile);
+            autoEndTurn = false;
         }
-    }
-    
-    // 2. Vergi
-    if (tile.type === 'tax') {
+    } else if (tile.type === 'tax') {
         player.money -= tile.price;
-        io.to(roomId).emit('moneyUpdate', { playerId: player.id, money: player.money });
-        io.to(roomId).emit('log', `${player.name} vergi ödedi: ${tile.price}₺`);
+        log(roomId, `${player.name} ${tile.price}₺ vergi ödedi.`);
+    } else if (tile.type === 'chance' || tile.type === 'chest') {
+        const luck = Math.random() > 0.5 ? 50 : -50;
+        player.money += luck;
+        log(roomId, luck > 0 ? `${player.name} piyangodan 50₺ kazandı!` : `${player.name} hastane masrafı 50₺ ödedi.`);
     }
 
-    // 3. Şans / Kamu Fonu (Basit Rastgele Para)
-    if (['chance', 'chest'].includes(tile.type)) {
-        const amount = (Math.random() > 0.5 ? 50 : -50);
-        player.money += amount;
-        io.to(roomId).emit('moneyUpdate', { playerId: player.id, money: player.money });
-        io.to(roomId).emit('cardEffect', { text: amount > 0 ? "Banka hatası lehinize!" : "Doktor masrafı!", amount });
-    }
+    io.to(roomId).emit('moneyUpdate', { players: room.players });
 
-    if (canEndTurn && !isDoubles) {
-        setTimeout(() => endTurn(roomId, false), 1500); // Otomatik tur geçişi
-    } else if (isDoubles) {
-        io.to(roomId).emit('log', `${player.name} çift attı, tekrar oynuyor!`);
-        // İstemciye tekrar atma yetkisi ver
-        io.to(roomId).emit('allowReRoll', player.id);
+    if (autoEndTurn) {
+        setTimeout(() => endTurn(roomId), 1500);
     }
 }
 
-function endTurn(roomId, isDoubles) {
-    if (isDoubles) return; // Çift atıldıysa tur değişmez
+function endTurn(roomId) {
     const room = rooms[roomId];
-    if(!room) return;
-    
-    room.turn = getNextPlayerId(room);
-    io.to(roomId).emit('turnChanged', room.turn);
+    if (!room) return;
+    room.turnIndex = (room.turnIndex + 1) % room.players.length;
+    // Eğer oyuncu elendiyse bir sonrakine geç (Burası eklenebilir)
+    io.to(roomId).emit('newTurn', { turnId: room.players[room.turnIndex].id });
+}
+
+function log(roomId, message) {
+    const room = rooms[roomId];
+    if(room) {
+        room.logs.push(message);
+        if(room.logs.length > 50) room.logs.shift();
+        io.to(roomId).emit('gameLog', message);
+    }
 }
 
 const PORT = process.env.PORT || 3000;
-http.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+server.listen(PORT, () => console.log(`Sunucu ${PORT} portunda aktif.`));
