@@ -4,7 +4,7 @@ const http = require('http').createServer(app);
 const path = require('path');
 const boardData = require('./public/board_data');
 
-// CORS Ayarı (Bağlantı sorunlarını çözer)
+// CORS Ayarı: Tüm sitelerden bağlantıya izin ver
 const io = require('socket.io')(http, {
     cors: {
         origin: "*",
@@ -13,20 +13,15 @@ const io = require('socket.io')(http, {
 });
 
 app.use(express.static(path.join(__dirname, 'public')));
-app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
+app.get('/', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+// === OYUN SİSTEMİ ===
 let rooms = {};
 
-// Oda listesini hazırla
-const getRoomList = () => {
-    return Object.values(rooms).map(r => ({
-        id: r.id,
-        name: r.players[0] ? r.players[0].name + "'in Odası" : "Boş Oda",
-        count: r.players.length,
-        status: r.status
-    }));
-};
-
+// OYUNCU OLUŞTURUCU
 const createPlayer = (id, name, avatar) => ({
     id, name, avatar,
     money: 1500,
@@ -37,60 +32,86 @@ const createPlayer = (id, name, avatar) => ({
     jailTurns: 0
 });
 
+// GÜVENLİ ODA LİSTESİ ALICI (Hata Çözümü Burası)
+const getRoomList = () => {
+    try {
+        return Object.values(rooms)
+            // Sadece içinde oyuncu olan odaları listele (Hata önleyici)
+            .filter(r => r.players && r.players.length > 0)
+            .map(r => ({
+                id: r.id,
+                name: r.players[0].name + "'in Odası",
+                count: r.players.length,
+                status: r.status
+            }));
+    } catch (error) {
+        console.error("Oda listesi hatası:", error);
+        return [];
+    }
+};
+
 const getNextTurn = (room) => {
-    if(!room.players.length) return null;
+    if(!room.players || room.players.length === 0) return null;
     const currentIdx = room.players.findIndex(p => p.id === room.turn);
     const nextIdx = (currentIdx + 1) % room.players.length;
     return room.players[nextIdx].id;
 };
 
 io.on('connection', (socket) => {
-    console.log('Bağlandı:', socket.id);
+    console.log('✅ Yeni Bağlantı:', socket.id);
 
-    // İlk bağlanışta oda listesini gönder
+    // Bağlanır bağlanmaz listeyi gönder
     socket.emit('roomList', getRoomList());
 
     socket.on('getRooms', () => {
         socket.emit('roomList', getRoomList());
     });
 
-    // --- ODA OLUŞTURMA ---
+    // --- ODA OLUŞTURMA (DÜZELTİLDİ) ---
     socket.on('createRoom', ({ nickname, avatar }) => {
-        // 5 Haneli Rastgele Oda Kodu Üret
-        const roomId = Math.random().toString(36).substring(2, 7).toUpperCase();
-        
-        rooms[roomId] = {
-            id: roomId,
-            players: [createPlayer(socket.id, nickname, avatar)],
-            status: 'LOBBY',
-            turn: null,
-            boardState: {}, 
-            logs: []
-        };
-        
-        socket.join(roomId);
-        
-        // ÖNEMLİ: İstemciye roomId'yi açıkça gönderiyoruz
-        socket.emit('roomJoined', { roomId: roomId, isHost: true });
-        
-        // Herkese listeyi güncelle
-        io.emit('roomList', getRoomList());
+        try {
+            // 1. ID Oluştur
+            const roomId = Math.random().toString(36).substring(2, 7).toUpperCase();
+            
+            // 2. Odayı Kaydet
+            rooms[roomId] = {
+                id: roomId,
+                players: [createPlayer(socket.id, nickname, avatar)],
+                status: 'LOBBY',
+                turn: null,
+                boardState: {}, 
+                logs: []
+            };
+
+            // 3. Socket'i odaya sok
+            socket.join(roomId);
+
+            // 4. İstemciye "Oda kuruldu" bilgisini gönder
+            console.log(`Oda Kuruldu: ${roomId} - Kurucu: ${nickname}`);
+            socket.emit('roomJoined', { roomId: roomId, isHost: true });
+
+            // 5. TÜM HERKESE güncel listeyi gönder (Böylece listede görünür)
+            io.emit('roomList', getRoomList());
+
+        } catch (e) {
+            console.error("Oda kurma hatası:", e);
+        }
     });
 
     // --- ODAYA KATILMA ---
     socket.on('joinRoom', ({ roomId, nickname, avatar }) => {
-        // roomId bazen boşluklu gelebilir, temizle
-        const cleanId = roomId ? roomId.trim().toUpperCase() : null;
-        const room = rooms[cleanId];
-
+        const room = rooms[roomId];
         if (room && room.status === 'LOBBY' && room.players.length < 4) {
             room.players.push(createPlayer(socket.id, nickname, avatar));
-            socket.join(cleanId);
+            socket.join(roomId);
             
-            // ÖNEMLİ: İstemciye roomId'yi gönder
-            socket.emit('roomJoined', { roomId: cleanId, isHost: false });
+            // Katılan kişiye bildir
+            socket.emit('roomJoined', { roomId: roomId, isHost: false });
             
-            io.to(cleanId).emit('updateLobby', room);
+            // Odadaki herkese lobiyi güncelle
+            io.to(roomId).emit('updateLobby', room);
+            
+            // Genel listeyi güncelle (Kişi sayısı değiştiği için)
             io.emit('roomList', getRoomList());
         } else {
             socket.emit('error', 'Oda bulunamadı, dolu veya oyun başlamış.');
@@ -103,10 +124,14 @@ io.on('connection', (socket) => {
             room.status = 'PLAYING';
             room.turn = room.players[0].id;
             io.to(roomId).emit('gameStarted', room);
-            io.emit('roomList', getRoomList());
+            io.emit('roomList', getRoomList()); // Durumu 'Oynuyor' yap
         }
     });
 
+    // ... (Zar atma, satın alma vb. kodları aynen kalabilir) ...
+    // Sadece oyun mantığı kodlarını buraya eklemeyi unutma, yukarıdaki server.js'den kopyalayabilirsin.
+    
+    // ZAR ATMA VE HAREKET
     socket.on('rollDice', (roomId) => {
         const room = rooms[roomId];
         if (!room || room.turn !== socket.id) return;
@@ -165,14 +190,17 @@ io.on('connection', (socket) => {
     });
 
     socket.on('endTurn', (roomId) => { endTurn(roomId); });
-    
+
     socket.on('disconnect', () => {
-        // Kopanları temizleme eklenebilir
+        // Odadan düşenleri temizlemek için basit mantık
+        // Prodüksiyonda daha gelişmiş bir yapı gerekir.
+        console.log('Kullanıcı çıktı:', socket.id);
     });
 });
 
 function movePlayer(roomId, player, steps) {
     const room = rooms[roomId];
+    if(!room) return;
     const oldPos = player.position;
     player.position = (player.position + steps) % 40;
 
