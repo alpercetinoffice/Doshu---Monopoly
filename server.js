@@ -1,17 +1,33 @@
 const express = require('express');
 const app = express();
 const http = require('http').createServer(app);
+const io = require('socket.io')(http, {
+    cors: {
+        origin: "*", // TÜM SİTELERDEN GELEN BAĞLANTILARI KABUL ET (ÖNEMLİ)
+        methods: ["GET", "POST"]
+    }
+});
 const path = require('path');
 const boardData = require('./public/board_data');
 
-const io = require('socket.io')(http, {
-    cors: { origin: "*", methods: ["GET", "POST"] }
+app.use(express.static(path.join(__dirname, 'public')));
+
+app.get('/', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-app.use(express.static(path.join(__dirname, 'public')));
-app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
-
+// === OYUN SİSTEMİ ===
 let rooms = {};
+
+// Oda listesini formatla
+const getRoomList = () => {
+    return Object.values(rooms).map(r => ({
+        id: r.id,
+        name: r.players[0] ? r.players[0].name + "'in Odası" : "Boş Oda",
+        count: r.players.length,
+        status: r.status
+    }));
+};
 
 const createPlayer = (id, name, avatar) => ({
     id, name, avatar,
@@ -24,28 +40,24 @@ const createPlayer = (id, name, avatar) => ({
 });
 
 const getNextTurn = (room) => {
+    if(!room.players.length) return null;
     const currentIdx = room.players.findIndex(p => p.id === room.turn);
     const nextIdx = (currentIdx + 1) % room.players.length;
     return room.players[nextIdx].id;
 };
 
-// Oda listesini array olarak döndürür
-const getRoomList = () => {
-    return Object.values(rooms).map(r => ({
-        id: r.id,
-        name: `${r.players[0].name}'in Odası`,
-        count: r.players.length,
-        status: r.status
-    }));
-};
-
 io.on('connection', (socket) => {
-    console.log('Bağlantı:', socket.id);
+    console.log('🔗 Yeni Bağlantı:', socket.id);
 
-    // ODA OLUŞTURMA (Düzeltildi)
+    // Bağlanır bağlanmaz oda listesini gönder
+    socket.emit('roomList', getRoomList());
+
+    socket.on('getRooms', () => {
+        socket.emit('roomList', getRoomList());
+    });
+
     socket.on('createRoom', ({ nickname, avatar }) => {
         const roomId = Math.random().toString(36).substr(2, 5).toUpperCase();
-        
         rooms[roomId] = {
             id: roomId,
             players: [createPlayer(socket.id, nickname, avatar)],
@@ -54,20 +66,12 @@ io.on('connection', (socket) => {
             boardState: {}, 
             logs: []
         };
-        
         socket.join(roomId);
-        socket.emit('roomJoined', { roomId, isHost: true }); // İstemciye odaya girdiğini bildir
-        
-        // Herkese yeni oda listesini gönder
+        socket.emit('roomJoined', { roomId, isHost: true });
+        // Tüm herkese güncel listeyi at
         io.emit('roomList', getRoomList());
     });
 
-    // ODA LİSTESİNİ İSTE
-    socket.on('getRooms', () => {
-        socket.emit('roomList', getRoomList());
-    });
-
-    // ODAYA KATILMA
     socket.on('joinRoom', ({ roomId, nickname, avatar }) => {
         const room = rooms[roomId];
         if (room && room.status === 'LOBBY' && room.players.length < 4) {
@@ -75,20 +79,19 @@ io.on('connection', (socket) => {
             socket.join(roomId);
             socket.emit('roomJoined', { roomId, isHost: false });
             io.to(roomId).emit('updateLobby', room);
-            io.emit('roomList', getRoomList()); // Listeyi güncelle
+            io.emit('roomList', getRoomList());
         } else {
             socket.emit('error', 'Oda bulunamadı veya dolu.');
         }
     });
 
-    // OYUNU BAŞLATMA
     socket.on('startGame', (roomId) => {
         const room = rooms[roomId];
         if (room && room.players[0].id === socket.id) {
             room.status = 'PLAYING';
             room.turn = room.players[0].id;
             io.to(roomId).emit('gameStarted', room);
-            io.emit('roomList', getRoomList()); // Durumu 'Oynuyor' olarak güncelle
+            io.emit('roomList', getRoomList());
         }
     });
 
@@ -152,8 +155,8 @@ io.on('connection', (socket) => {
     socket.on('endTurn', (roomId) => { endTurn(roomId); });
     
     socket.on('disconnect', () => {
-        // Basit oda temizliği (geliştirilebilir)
-        // Gerçek bir oyunda odayı silmek yerine oyuncuyu "offline" işaretlemek daha iyidir.
+        // Kopan oyuncuları temizleme mantığı eklenebilir
+        console.log('Kullanıcı ayrıldı:', socket.id);
     });
 });
 
