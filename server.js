@@ -12,7 +12,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
 let rooms = {};
-const TURN_TIME_LIMIT = 45;
+const TURN_TIME_LIMIT = 60; // Düşünme süresini artırdım
 
 // --- KART DESTELERİ ---
 const CHANCE_CARDS = [
@@ -21,22 +21,20 @@ const CHANCE_CARDS = [
     { id: 3, text: "İlerleyin: Başlangıç noktasına git.", action: 'move', target: 0 },
     { id: 4, text: "Doğrudan Hapse Git!", action: 'jail' },
     { id: 5, text: "Tüm oyunculara 10.000₺ öde.", action: 'payall', amount: 10000 },
-    { id: 6, text: "Yeniköy'e git (Eğer geçersen 200K al).", action: 'move', target: 39 },
+    { id: 6, text: "Yeniköy'e git.", action: 'move', target: 39 },
     { id: 7, text: "Bankanın hatası! 200.000₺ kazandın.", action: 'money', amount: 200000 },
-    { id: 8, text: "Okul masrafları: 50.000₺ öde.", action: 'money', amount: -50000 }
 ];
 
 const CHEST_CARDS = [
     { id: 1, text: "Doktor masrafı: 50.000₺ öde.", action: 'money', amount: -50000 },
     { id: 2, text: "Vergi iadesi: 20.000₺ al.", action: 'money', amount: 20000 },
-    { id: 3, text: "Hapisten Ücretsiz Çıkış Kartı!", action: 'money', amount: 50000 }, // Basitlik için para
+    { id: 3, text: "Hapisten Ücretsiz Çıkış Kartı!", action: 'money', amount: 50000 }, 
     { id: 4, text: "Miras kaldı! 100.000₺", action: 'money', amount: 100000 },
     { id: 5, text: "Her oyuncudan 10.000₺ topla.", action: 'collectall', amount: 10000 },
     { id: 6, text: "Doğrudan Hapse Git!", action: 'jail' },
-    { id: 7, text: "Hastane masrafları: 100.000₺ öde.", action: 'money', amount: -100000 },
-    { id: 8, text: "Emlak vergisi: Ev başına 25.000₺ öde.", action: 'repair', amount: 25000 }
 ];
 
+// OYUNCU OLUŞTURMA (Başlangıç Parası 1.5M - Kontrol Edildi)
 const createPlayer = (id, name, avatar) => ({
     id, name, avatar,
     money: 1500000, 
@@ -57,18 +55,18 @@ const calcRent = (room, tileIndex, diceTotal = 0) => {
     const tile = boardData[tileIndex];
     const houses = (room.houseState && room.houseState[tileIndex]) || 0;
     
-    // İstasyon Hesabı
+    // İstasyon
     if(tile.type === 'station') {
         const ownerId = room.boardState[tileIndex];
         const owner = room.players.find(p => p.id === ownerId);
         if(!owner) return 25000;
-        const stationCount = owner.properties.filter(idx => boardData[idx].type === 'station').length;
-        return 25000 * Math.pow(2, stationCount - 1);
+        const count = owner.properties.filter(idx => boardData[idx].type === 'station').length;
+        return 25000 * Math.pow(2, count - 1);
     }
-    // Fatura Hesabı
+    // Fatura
     if(tile.type === 'utility') return (diceTotal || 7) * 2000;
     
-    // Konut Hesabı
+    // Konut
     if (tile.rents && tile.rents.length > 0) {
         if (houses > 0 && houses <= 5) return tile.rents[houses];
         return tile.rents[0]; 
@@ -76,7 +74,7 @@ const calcRent = (room, tileIndex, diceTotal = 0) => {
     return tile.rent || 0;
 };
 
-// --- OYUN DÖNGÜSÜ ---
+// --- OYUN AKIŞI ---
 const startTurnTimer = (roomId) => {
     const room = rooms[roomId];
     if (!room || room.status !== 'PLAYING') return;
@@ -91,17 +89,12 @@ const startTurnTimer = (roomId) => {
         }
         if (room.timeLeft <= 0) {
             clearInterval(room.timer);
-            handleAutoPass(roomId);
+            // Otomatik pas geçme
+            const p = room.players.find(x => x.id === room.turn);
+            io.to(roomId).emit('log', `⏳ ${p.name} süre aşımı. Pas geçiliyor.`);
+            endTurn(roomId);
         }
     }, 1000);
-};
-
-const handleAutoPass = (roomId) => {
-    const room = rooms[roomId];
-    if (room) {
-        io.to(roomId).emit('log', `⏳ Süre doldu! Pas geçiliyor.`);
-        endTurn(roomId);
-    }
 };
 
 const handleBankruptcy = (room, debtor, creditorId) => {
@@ -133,7 +126,6 @@ const handleBankruptcy = (room, debtor, creditorId) => {
     }
 };
 
-// --- SOCKET EVENTS ---
 io.on('connection', (socket) => {
     const getList = () => Object.values(rooms).filter(r => r.players.length).map(r => ({ id: r.id, name: r.players[0].name, count: r.players.length, status: r.status }));
     socket.emit('roomList', getList());
@@ -202,17 +194,17 @@ io.on('connection', (socket) => {
                     io.to(roomId).emit('log', `${p.name} zorunlu kefalet ödedi.`);
                     movePlayer(room, p, total, total); 
                 } else { 
-                    io.to(roomId).emit('log', `${p.name} hapiste.`);
-                    endTurn(roomId); 
+                    io.to(roomId).emit('log', `${p.name} hapiste kaldı.`);
+                    // Hapiste kaldığı için turu manuel bitirmesini beklemesi için sinyal gönder
+                    io.to(p.id).emit('purchaseSuccess'); 
                 }
             }
         } else {
             movePlayer(room, p, total, total);
+            // Çift atarsa tekrar oynasın, yoksa tur sonu
             if(d1===d2 && !p.isBankrupt && !p.inJail) { 
                 io.to(roomId).emit('allowReRoll'); 
                 startTurnTimer(roomId);
-            } else {
-                // Manuel bitirme için bekle
             }
         }
     });
@@ -227,7 +219,7 @@ io.on('connection', (socket) => {
             room.boardState[p.position] = p.id;
             io.to(roomId).emit('propertyBought', { playerId: p.id, tileIndex: p.position, money: p.money });
             io.to(roomId).emit('log', `${p.name}, ${tile.name} aldı.`);
-            socket.emit('purchaseSuccess'); // Turu bitir butonunu aç
+            socket.emit('purchaseSuccess'); 
         }
     });
 
@@ -258,7 +250,6 @@ io.on('connection', (socket) => {
             const idx = r.players.findIndex(p => p.id === socket.id);
             if(idx !== -1) {
                 if(r.status === 'LOBBY') r.players.splice(idx, 1);
-                
                 setTimeout(() => {
                    const s = io.sockets.adapter.rooms.get(rid);
                    if(!s || s.size === 0) {
@@ -293,28 +284,32 @@ function movePlayer(room, player, steps, diceTotal) {
     
     // KART ÇEKME
     if (tile.type === 'chance' || tile.type === 'chest') {
-        setTimeout(() => { drawCard(room, player, tile.type); }, 1000);
+        setTimeout(() => { drawCard(room, player, tile.type); }, 1500);
         return;
     }
 
+    // MÜLK ETKİLEŞİMİ
     if (['property','station','utility'].includes(tile.type)) {
         const ownerId = room.boardState[player.position];
         if (ownerId && ownerId !== player.id) {
+            // BAŞKASININ MÜLKÜ
             const rent = calcRent(room, player.position, diceTotal);
             const owner = room.players.find(p => p.id === ownerId);
             if (player.money >= rent) {
                 player.money -= rent; owner.money += rent;
                 io.to(room.id).emit('moneyUpdate', { playerId: player.id, money: player.money });
                 io.to(room.id).emit('moneyUpdate', { playerId: owner.id, money: owner.money });
-                io.to(room.id).emit('log', `${player.name}, ${rent}₺ ödedi.`);
+                io.to(room.id).emit('log', `${player.name}, ${rent}₺ kira ödedi.`);
                 io.to(player.id).emit('purchaseSuccess'); // Kira ödeyen manuel bitirsin
             } else {
                 handleBankruptcy(room, player, owner.id);
             }
         } else if (!ownerId && player.money >= tile.price) {
+            // SATIN ALMA TEKLİFİ
             io.to(player.id).emit('offerBuy', tile);
         } else {
-             io.to(player.id).emit('purchaseSuccess');
+             // BOŞ VEYA PARA YETMİYOR VEYA KENDİ MÜLKÜ
+             io.to(player.id).emit('purchaseSuccess'); // Manuel bitirme aktif
         }
     } else if (tile.type === 'tax') {
         if(player.money>=tile.price) { 
@@ -324,6 +319,7 @@ function movePlayer(room, player, steps, diceTotal) {
             io.to(player.id).emit('purchaseSuccess');
         } else handleBankruptcy(room, player);
     } else {
+        // BAŞLANGIÇ / OTOPARK
         io.to(player.id).emit('purchaseSuccess');
     }
 }
@@ -372,15 +368,6 @@ function applyCardEffect(room, player, card) {
                 io.to(room.id).emit('moneyUpdate', { playerId: p.id, money: p.money });
             }
         });
-        io.to(room.id).emit('moneyUpdate', { playerId: player.id, money: player.money });
-    }
-    else if (card.action === 'repair') {
-        let totalCost = 0;
-        player.properties.forEach(idx => {
-            const h = (room.houseState && room.houseState[idx]) || 0;
-            totalCost += h * card.amount;
-        });
-        player.money -= totalCost;
         io.to(room.id).emit('moneyUpdate', { playerId: player.id, money: player.money });
     }
 }
